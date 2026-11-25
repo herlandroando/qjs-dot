@@ -1,13 +1,27 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-/// Builds the JavaScript bootstrap script injected once per QuickJS-ng context.
+/// Builds the JavaScript bootstrap script evaluated once per QuickJS-ng
+/// context before user scripts execute.
+///
+/// Installs:
+/// - JS ↔ Dart marshaling helpers (`__qjs_dot_encode`, `__qjs_dot_decode`,
+///   `__qjs_dot_set_global`)
+/// - Async settlement bridge (`__qjs_dot_attach_promise`)
+/// - `console.{debug,log,info,warn,error}`
+/// - `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask`
+/// - `sendMessage(channel, payload)` bidirectional bridge
+/// - `atob`/`btoa`, `TextEncoder`/`TextDecoder` (UTF-8), `URL`/`URLSearchParams`
+/// - When [enableFetchPolyfill] is `true`, `Headers`, `Request`, `Response`,
+///   and `fetch()`
 String buildPolyfillBootstrap({required bool enableFetchPolyfill}) {
   return '''
 (function(global) {
   'use strict';
 
   // --- Base64 helpers (RFC 4648) ---
+  // Pure-JS encoder/decoder so binary marshaling, `atob`/`btoa`, and `fetch`
+  // work without extra native bindings.
   var _B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   var _B64_LOOKUP = new Uint8Array(256);
   _B64_LOOKUP.fill(255);
@@ -59,6 +73,13 @@ String buildPolyfillBootstrap({required bool enableFetchPolyfill}) {
   }
 
   // --- Value Marshaling between JS and Dart ---
+  // Wire envelope from JS -> Dart:
+  //   { k: 'j', v: <JSON-safe sanitized value> }
+  //   { k: 'n', v: 'NaN' | 'Inf' | '-Inf' }
+  //   { k: 'i', v: '<bigint decimal string>' }
+  //   { k: 'b', v: '<base64 bytes>' }
+  // Nested binary/special-number values inside objects/arrays use inline tags:
+  //   { __qjs_dot_t: 'b', d: '<base64>' } | { __qjs_dot_t: 'n', d: 'NaN'|'Inf'|'-Inf' }
   function _sanitize(value, seen) {
     if (value === null || value === undefined) return null;
     var t = typeof value;
@@ -175,6 +196,8 @@ String buildPolyfillBootstrap({required bool enableFetchPolyfill}) {
   };
 
   // --- Async Promise settlement bridge ---
+  // Attaches `.then(onFulfilled, onRejected)` to an unsettled Promise/thenable
+  // and reports the encoded result or error back to C via `__qjs_dot_eval_settled`.
   global.__qjs_dot_attach_promise = function(evalId, promise, resolveOverride) {
     Promise.resolve(promise).then(
       function(val) {
@@ -732,6 +755,8 @@ String buildPolyfillBootstrap({required bool enableFetchPolyfill}) {
   global.URL = URL;
 
   // --- Fetch Polyfill (Headers, Request, Response, fetch) ---
+  // Delegates HTTP I/O to the host isolate (`__qjs_dot_fetch` -> Dart handler)
+  // and resolves via `__qjs_dot_resolve_fetch`. Enforces single-use `bodyUsed`.
   if (${enableFetchPolyfill ? 'true' : 'false'}) {
     function Headers(init) {
       this._map = new Map();
@@ -899,6 +924,10 @@ String buildPolyfillBootstrap({required bool enableFetchPolyfill}) {
 }
 
 /// Encodes a Dart value into JSON understood by JS `__qjs_dot_decode`.
+///
+/// Maps `Uint8List` and non-finite `double` values (`NaN`, `±Infinity`) to
+/// `{__qjs_dot_t: ...}` marker objects that JS unwraps back into `Uint8List`
+/// and IEEE-754 special numbers. `BigInt` and unknown objects are stringified.
 String encodeDartValueToJsJson(dynamic value) {
   return jsonEncode(_wrapDartValue(value));
 }
@@ -937,7 +966,12 @@ dynamic _wrapDartValue(dynamic value) {
   return value.toString();
 }
 
-/// Decodes a JSON envelope produced by JS `__qjs_dot_encode`.
+/// Decodes a JSON wire envelope produced by JS `__qjs_dot_encode` (or raw JSON
+/// from `sendMessage`) back into native Dart values.
+///
+/// Restores tagged `BigInt` (`k: 'i'`), `Uint8List` (`k: 'b'` or nested
+/// `__qjs_dot_t: 'b'`), and `double.nan` / infinities (`k: 'n'` or nested
+/// `__qjs_dot_t: 'n'`).
 dynamic decodeJsPayload(String? jsonStr) {
   if (jsonStr == null || jsonStr.isEmpty) {
     return null;
@@ -969,6 +1003,7 @@ dynamic decodeJsPayload(String? jsonStr) {
   return _unwrapEnvelopeValue(decoded);
 }
 
+// Recursively unwraps `{__qjs_dot_t: ...}` markers inside decoded Lists/Maps.
 dynamic _unwrapEnvelopeValue(dynamic value) {
   if (value is List) {
     for (var i = 0; i < value.length; i++) {

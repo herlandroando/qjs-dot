@@ -4,13 +4,20 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:qjs_dot/qjs_dot.dart';
 
+/// Entry point for the `qjs_dot` interactive playground app.
 void main() {
   runApp(const QjsDotExampleApp());
 }
 
+/// Root Material widget hosting the QuickJS-ng playground.
 class QjsDotExampleApp extends StatelessWidget {
+  /// Creates the example application.
+  ///
+  /// Set [autoInit] to `false` in widget tests that mount the UI without a
+  /// native `qjs_dot` shared library loaded.
   const QjsDotExampleApp({super.key, this.autoInit = true});
 
+  /// Whether [PlaygroundPage] should create a [QjsRuntime] on startup.
   final bool autoInit;
 
   @override
@@ -26,9 +33,13 @@ class QjsDotExampleApp extends StatelessWidget {
   }
 }
 
+/// Interactive sandbox screen demonstrating async evaluation, `sendMessage()`,
+/// mocked `fetch()`, ES Modules, `console.*` streaming, and timeout guards.
 class PlaygroundPage extends StatefulWidget {
+  /// Creates the playground page.
   const PlaygroundPage({super.key, this.autoInit = true});
 
+  /// Whether to automatically initialize [QjsRuntime] in [initState].
   final bool autoInit;
 
   @override
@@ -66,6 +77,8 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     }
   }
 
+  // Initializes a sandboxed QjsRuntime with a 3s timeout, console listener,
+  // mocked fetch handler, static 'math.js' module, and 'ping' message handler.
   Future<void> _initRuntime() async {
     try {
       final rt = await QjsRuntime.create(
@@ -124,6 +137,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     super.dispose();
   }
 
+  // Evaluates the editor contents either as an ES module or an async script.
   Future<void> _runSnippet({bool asModule = false}) async {
     final rt = _runtime;
     if (rt == null || _running) return;
@@ -151,11 +165,13 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     }
   }
 
+  // Demonstrates the native interrupt handler aborting an infinite loop.
   Future<void> _runInfiniteLoopTest() async {
     _codeController.text = 'while (true) {}';
     await _runSnippet();
   }
 
+  // Demonstrates importing from the pre-registered static 'math.js' ES module.
   Future<void> _runModuleDemo() async {
     _codeController.text = '''
 import { add } from 'math.js';

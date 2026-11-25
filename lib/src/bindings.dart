@@ -3,71 +3,102 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
-/// Opaque native handle for a QuickJS-ng engine instance.
+/// Opaque native handle for a QuickJS-ng engine instance (`QjsEngine*`).
 final class NativeQjsEngine extends Opaque {}
 
-/// Native evaluation result matching `QjsEvalResult` in `src/qjs_bridge.h`.
+/// Native evaluation result struct matching `QjsEvalResult` in `src/qjs_bridge.h`.
+///
+/// Heap-allocated strings populated by C (`valueJson`, `errorName`,
+/// `errorMessage`, `errorStack`) must be released via [QjsBindings.freeResult].
 final class NativeEvalResult extends Struct {
+  /// Non-zero (`1`) when evaluation succeeded; `0` on exception or failure.
   @Int32()
   external int ok;
 
+  /// Non-zero (`1`) when an async `Promise` or thenable is still pending and
+  /// will settle later via [NativeEvalSettledCallback].
   @Int32()
   external int pendingAsync;
 
+  /// Non-zero (`1`) if evaluation was interrupted by the timeout deadline.
   @Int32()
   external int isTimeout;
 
+  /// Non-zero (`1`) if evaluation failed due to exhausting the heap limit.
   @Int32()
   external int isMemoryLimit;
 
+  /// Encoded JSON payload of the resolved value, or `nullptr` for `null`/`undefined`.
   external Pointer<Utf8> valueJson;
+
+  /// JavaScript error `name` when [ok] is `0`.
   external Pointer<Utf8> errorName;
+
+  /// JavaScript error `message` when [ok] is `0`.
   external Pointer<Utf8> errorMessage;
+
+  /// Optional JavaScript stack trace when [ok] is `0`.
   external Pointer<Utf8> errorStack;
 }
 
 /// Native memory usage snapshot matching `QjsMemoryUsage` in `src/qjs_bridge.h`.
 final class NativeMemoryUsage extends Struct {
+  /// Total bytes currently allocated by the QuickJS-ng allocator.
   @Int64()
   external int mallocSize;
 
+  /// Configured maximum heap allocation limit in bytes (`0` if unlimited).
   @Int64()
   external int mallocLimit;
 
+  /// Bytes actively used by live QuickJS-ng objects.
   @Int64()
   external int memoryUsedSize;
 
+  /// Number of active allocator blocks.
   @Int64()
   external int mallocCount;
 
+  /// Number of live runtime allocations.
   @Int64()
   external int memoryUsedCount;
 
+  /// Number of interned JS atoms.
   @Int64()
   external int atomCount;
 
+  /// Number of live JS strings.
   @Int64()
   external int strCount;
 
+  /// Number of live JS objects.
   @Int64()
   external int objCount;
 
+  /// Number of live JS functions.
   @Int64()
   external int jsFuncCount;
 
+  /// Number of live binary objects (`ArrayBuffer`, `TypedArray`).
   @Int64()
   external int binaryObjectCount;
 
+  /// Total bytes held by binary objects.
   @Int64()
   external int binaryObjectSize;
 }
 
+/// C-to-Dart callback signature for `console.*` log events.
+///
+/// Invoked synchronously on the worker isolate thread; [message] is only valid
+/// for the duration of the callback.
 typedef NativeConsoleCallback = Void Function(
   Pointer<Void> opaque,
   Int32 level,
   Pointer<Utf8> message,
 );
 
+/// C-to-Dart callback signature for scheduling a JS timer (`setTimeout`/`setInterval`).
 typedef NativeTimerSetCallback = Void Function(
   Pointer<Void> opaque,
   Int64 timerId,
@@ -75,11 +106,13 @@ typedef NativeTimerSetCallback = Void Function(
   Int32 isInterval,
 );
 
+/// C-to-Dart callback signature for cancelling a pending JS timer.
 typedef NativeTimerClearCallback = Void Function(
   Pointer<Void> opaque,
   Int64 timerId,
 );
 
+/// C-to-Dart callback signature for JS `sendMessage(channel, payload)` calls.
 typedef NativePostMessageCallback = Void Function(
   Pointer<Void> opaque,
   Int64 requestId,
@@ -87,6 +120,7 @@ typedef NativePostMessageCallback = Void Function(
   Pointer<Utf8> payloadJson,
 );
 
+/// C-to-Dart callback signature for JS `fetch()` requests.
 typedef NativeFetchCallback = Void Function(
   Pointer<Void> opaque,
   Int64 requestId,
@@ -97,6 +131,7 @@ typedef NativeFetchCallback = Void Function(
   Int32 hasBody,
 );
 
+/// C-to-Dart callback signature invoked when an async evaluation `Promise` settles.
 typedef NativeEvalSettledCallback = Void Function(
   Pointer<Void> opaque,
   Int64 evalId,
@@ -107,6 +142,10 @@ typedef NativeEvalSettledCallback = Void Function(
   Pointer<Utf8> errorStack,
 );
 
+/// C-to-Dart callback signature for dynamic ES module resolution.
+///
+/// The worker isolate blocks on a native condition variable until the host
+/// calls [QjsBindings.completeModuleLoad] or [QjsBindings.cancelModuleWait].
 typedef NativeModuleRequestCallback = Void Function(
   Pointer<Void> opaque,
   Int64 requestId,
@@ -115,14 +154,32 @@ typedef NativeModuleRequestCallback = Void Function(
 );
 
 /// Native callback table matching `QjsCallbacks` in `src/qjs_bridge.h`.
+///
+/// All function pointers must be `NativeCallable.isolateLocal` callbacks owned
+/// by the worker isolate that created the `QjsEngine`.
 final class NativeCallbacks extends Struct {
+  /// User-supplied opaque pointer forwarded to every callback.
   external Pointer<Void> opaque;
+
+  /// Callback for `console.*` output.
   external Pointer<NativeFunction<NativeConsoleCallback>> onConsole;
+
+  /// Callback for `setTimeout` and `setInterval`.
   external Pointer<NativeFunction<NativeTimerSetCallback>> onTimerSet;
+
+  /// Callback for `clearTimeout` and `clearInterval`.
   external Pointer<NativeFunction<NativeTimerClearCallback>> onTimerClear;
+
+  /// Callback for `sendMessage(channel, payload)`.
   external Pointer<NativeFunction<NativePostMessageCallback>> onPostMessage;
+
+  /// Callback for `fetch()`.
   external Pointer<NativeFunction<NativeFetchCallback>> onFetch;
+
+  /// Callback for async `Promise` settlement.
   external Pointer<NativeFunction<NativeEvalSettledCallback>> onEvalSettled;
+
+  /// Callback for dynamic ES module resolution.
   external Pointer<NativeFunction<NativeModuleRequestCallback>> onModuleRequest;
 }
 
@@ -224,7 +281,10 @@ typedef _MemoryUsageDart = void Function(
 typedef _FreeResultNative = Void Function(Pointer<NativeEvalResult> result);
 typedef _FreeResultDart = void Function(Pointer<NativeEvalResult> result);
 
-/// Thin FFI wrapper around the `qjs_dot` native shared library.
+/// Thin `dart:ffi` wrapper around the `qjs_dot` native shared library.
+///
+/// Loads symbol bindings from `src/qjs_bridge.h`. Each [Isolate] that accesses
+/// native `qjs_dot_*` symbols loads its own [QjsBindings] instance.
 class QjsBindings {
   QjsBindings._(this.library)
       : create = library.lookupFunction<_CreateNative, _CreateDart>('qjs_dot_create'),
@@ -257,7 +317,11 @@ class QjsBindings {
     return QjsBindings._(openDynamicLibrary(libraryPath));
   }
 
-  /// Opens the native library without caching bindings.
+  /// Opens the native `qjs_dot` [DynamicLibrary] for the current OS.
+  ///
+  /// Uses [libraryPath] when non-empty; otherwise resolves `libqjs_dot.so` on
+  /// Android/Linux, `qjs_dot.dll` on Windows, or [DynamicLibrary.process] on
+  /// iOS/macOS where CocoaPods statically links the symbols into the process.
   static DynamicLibrary openDynamicLibrary([String? libraryPath]) {
     if (libraryPath != null && libraryPath.isNotEmpty) {
       return DynamicLibrary.open(libraryPath);
@@ -276,14 +340,21 @@ class QjsBindings {
     );
   }
 
+  /// Loaded native [DynamicLibrary] handle.
   final DynamicLibrary library;
+
+  /// Bound `qjs_dot_create` function.
   final Pointer<NativeQjsEngine> Function(
     int memoryLimitBytes,
     int maxStackSizeBytes,
     int defaultTimeoutMs,
     Pointer<NativeCallbacks> callbacks,
   ) create;
+
+  /// Bound `qjs_dot_destroy` function.
   final void Function(Pointer<NativeQjsEngine> engine) destroy;
+
+  /// Bound `qjs_dot_eval` function.
   final int Function(
     Pointer<NativeQjsEngine> engine,
     Pointer<Utf8> code,
@@ -293,30 +364,44 @@ class QjsBindings {
     int timeoutMs,
     Pointer<NativeEvalResult> outResult,
   ) eval;
+
+  /// Bound `qjs_dot_execute_pending_jobs` function.
   final int Function(
     Pointer<NativeQjsEngine> engine,
     int timeoutMs,
     Pointer<NativeEvalResult> outResult,
   ) executePendingJobs;
+
+  /// Bound `qjs_dot_register_module` function.
   final int Function(
     Pointer<NativeQjsEngine> engine,
     Pointer<Utf8> specifier,
     Pointer<Utf8> source,
   ) registerModule;
+
+  /// Bound `qjs_dot_unregister_module` function.
   final int Function(
     Pointer<NativeQjsEngine> engine,
     Pointer<Utf8> specifier,
   ) unregisterModule;
+
+  /// Bound `qjs_dot_complete_module_load` function (safe to call cross-thread).
   final void Function(
     Pointer<NativeQjsEngine> engine,
     int requestId,
     Pointer<Utf8> source,
     Pointer<Utf8> error,
   ) completeModuleLoad;
+
+  /// Bound `qjs_dot_cancel_module_wait` function (safe to call cross-thread).
   final void Function(Pointer<NativeQjsEngine> engine) cancelModuleWait;
+
+  /// Bound `qjs_dot_memory_usage` function.
   final void Function(
     Pointer<NativeQjsEngine> engine,
     Pointer<NativeMemoryUsage> outUsage,
   ) memoryUsage;
+
+  /// Bound `qjs_dot_free_result` function.
   final void Function(Pointer<NativeEvalResult> result) freeResult;
 }

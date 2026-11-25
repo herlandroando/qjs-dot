@@ -4,13 +4,23 @@ import 'dart:typed_data';
 import 'models.dart';
 
 /// Default `fetch()` implementation backed by `dart:io` [HttpClient].
+///
+/// Created automatically on the host isolate when
+/// [QjsRuntimeOptions.enableFetchPolyfill] is `true` and
+/// [QjsRuntimeOptions.fetchHandler] is `null`.
 class DefaultQjsFetchClient {
+  /// Creates a default fetch client, optionally wrapping a custom [client].
   DefaultQjsFetchClient({HttpClient? client}) : _client = client ?? HttpClient();
 
   final HttpClient _client;
   bool _closed = false;
 
-  /// Executes [request] and returns a [QjsFetchResponse].
+  /// Executes [request] via `dart:io` [HttpClient] and returns a
+  /// [QjsFetchResponse].
+  ///
+  /// Follows HTTP redirects automatically, joins multi-value response headers
+  /// with `', '`, and buffers the response body into memory. Throws [StateError]
+  /// if [close] has already been called.
   Future<QjsFetchResponse> fetch(QjsFetchRequest request) async {
     if (_closed) {
       throw StateError('HttpClient has already been closed');
@@ -52,7 +62,9 @@ class DefaultQjsFetchClient {
     );
   }
 
-  /// Closes the underlying [HttpClient].
+  /// Force-closes the underlying [HttpClient] and aborts active connections.
+  ///
+  /// Idempotent; subsequent calls are no-ops.
   void close() {
     if (_closed) return;
     _closed = true;

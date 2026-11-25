@@ -9,7 +9,8 @@ import 'bindings.dart';
 import 'models.dart';
 import 'polyfills.dart';
 
-/// Initialization payload passed from the main isolate to the worker isolate.
+/// Initialization payload passed from the host isolate to the worker isolate
+/// via `Isolate.spawn`.
 class WorkerInitMessage {
   const WorkerInitMessage({
     required this.mainPort,
@@ -22,17 +23,33 @@ class WorkerInitMessage {
     this.libraryPath,
   });
 
+  /// Host isolate port receiving readiness and unsolicited worker events.
   final SendPort mainPort;
+
+  /// Heap memory limit passed to `qjs_dot_create` (`0` = unlimited).
   final int memoryLimitBytes;
+
+  /// JS call stack limit passed to `qjs_dot_create` (`0` = engine default).
   final int maxStackSizeBytes;
+
+  /// Default per-evaluation timeout in milliseconds (`0` = disabled).
   final int timeoutMs;
+
+  /// Whether to inject the JS `fetch`/`Headers`/`Request`/`Response` polyfill.
   final bool enableFetchPolyfill;
+
+  /// Initial static ES module sources keyed by specifier.
   final Map<String, String> initialModules;
+
+  /// Initial globals pre-encoded via `encodeDartValueToJsJson`.
   final Map<String, String> initialGlobalsJson;
+
+  /// Optional explicit native library path override.
   final String? libraryPath;
 }
 
-/// Sent by the worker once engine creation succeeds or fails.
+/// Handshake event sent by the worker isolate once engine creation succeeds or
+/// fails.
 class WorkerReadyEvent {
   const WorkerReadyEvent({
     this.workerPort,
@@ -40,24 +57,43 @@ class WorkerReadyEvent {
     this.error,
   });
 
+  /// Worker command `SendPort` when initialization succeeded.
   final SendPort? workerPort;
+
+  /// Raw native `QjsEngine*` address used by the host for cross-thread
+  /// `completeModuleLoad` / `cancelModuleWait` calls.
   final int? engineAddress;
+
+  /// Error description when initialization failed.
   final String? error;
 }
 
+/// Console log notification emitted from JS `console.*` to the host isolate.
 class WorkerConsoleEvent {
   const WorkerConsoleEvent(this.level, this.message);
+
+  /// Numeric index mapping into [QjsConsoleLevel.values].
   final int level;
+
+  /// Pre-formatted console log string.
   final String message;
 }
 
+/// Request sent from JS `sendMessage(channel, payload)` to the host isolate.
 class WorkerMessageRequest {
   const WorkerMessageRequest(this.requestId, this.channel, this.payloadJson);
+
+  /// Monotonic JS request identifier used to correlate the host reply.
   final int requestId;
+
+  /// Target message channel name.
   final String channel;
+
+  /// JSON-encoded sanitized payload from JS.
   final String payloadJson;
 }
 
+/// HTTP request forwarded from JS `fetch()` to the host isolate.
 class WorkerFetchRequest {
   const WorkerFetchRequest({
     required this.requestId,
@@ -68,21 +104,41 @@ class WorkerFetchRequest {
     required this.hasBody,
   });
 
+  /// Monotonic JS fetch identifier used to correlate the host reply.
   final int requestId;
+
+  /// Target URL string.
   final String url;
+
+  /// Uppercase HTTP method.
   final String method;
+
+  /// JSON-encoded header object.
   final String headersJson;
+
+  /// Base64-encoded request body bytes (empty when [hasBody] is `false`).
   final String bodyBase64;
+
+  /// Whether a request body was provided.
   final bool hasBody;
 }
 
+/// Dynamic ES module resolution request sent when an import specifier misses
+/// the native static registry.
 class WorkerModuleLoadRequest {
   const WorkerModuleLoadRequest(this.requestId, this.specifier, this.referrer);
+
+  /// Native request ID matched by `qjs_dot_complete_module_load`.
   final int requestId;
+
+  /// Normalized ES module specifier.
   final String specifier;
+
+  /// Referring module specifier (or empty string if unavailable).
   final String referrer;
 }
 
+/// Command instructing the worker isolate to evaluate JS code or an ES module.
 class WorkerEvalCmd {
   const WorkerEvalCmd({
     required this.cmdId,
@@ -94,15 +150,29 @@ class WorkerEvalCmd {
     required this.replyPort,
   });
 
+  /// Host command ID correlated via [WorkerCmdSuccess] or [WorkerCmdError].
   final int cmdId;
+
+  /// JavaScript source code to evaluate.
   final String code;
+
+  /// Virtual filename shown in stack traces and used as module base path.
   final String filename;
+
+  /// Whether to compile and evaluate [code] as an ES module.
   final bool isModule;
+
+  /// Whether to await returned Promises/thenables via `__qjs_dot_attach_promise`.
   final bool isAsync;
+
+  /// Per-call timeout in ms (`-1` = default, `0` = disabled, `> 0` = explicit).
   final int timeoutMs;
+
+  /// Host port to send the settled evaluation result to.
   final SendPort replyPort;
 }
 
+/// Command instructing the worker isolate to set a property on `globalThis`.
 class WorkerSetGlobalCmd {
   const WorkerSetGlobalCmd({
     required this.cmdId,
@@ -117,6 +187,7 @@ class WorkerSetGlobalCmd {
   final SendPort replyPort;
 }
 
+/// Command instructing the worker isolate to register a static ES module.
 class WorkerRegisterModuleCmd {
   const WorkerRegisterModuleCmd({
     required this.cmdId,
@@ -131,6 +202,7 @@ class WorkerRegisterModuleCmd {
   final SendPort replyPort;
 }
 
+/// Command instructing the worker isolate to remove a static ES module.
 class WorkerUnregisterModuleCmd {
   const WorkerUnregisterModuleCmd({
     required this.cmdId,
@@ -143,6 +215,7 @@ class WorkerUnregisterModuleCmd {
   final SendPort replyPort;
 }
 
+/// Command requesting a [QjsMemoryUsage] snapshot from the native engine.
 class WorkerMemoryUsageCmd {
   const WorkerMemoryUsageCmd({
     required this.cmdId,
@@ -153,6 +226,7 @@ class WorkerMemoryUsageCmd {
   final SendPort replyPort;
 }
 
+/// Host-to-worker reply resolving or rejecting a JS `sendMessage()` Promise.
 class WorkerHostMessageReplyCmd {
   const WorkerHostMessageReplyCmd({
     required this.requestId,
@@ -167,6 +241,7 @@ class WorkerHostMessageReplyCmd {
   final String? errorMessage;
 }
 
+/// Host-to-worker reply resolving or rejecting a JS `fetch()` Promise.
 class WorkerHostFetchReplyCmd {
   const WorkerHostFetchReplyCmd({
     required this.requestId,
@@ -189,6 +264,7 @@ class WorkerHostFetchReplyCmd {
   final String? errorMessage;
 }
 
+/// Command instructing the worker isolate to destroy its native engine and exit.
 class WorkerDisposeCmd {
   const WorkerDisposeCmd({
     required this.cmdId,
@@ -199,18 +275,22 @@ class WorkerDisposeCmd {
   final SendPort replyPort;
 }
 
+/// Successful RPC response sent back to the host on `replyPort`.
 class WorkerCmdSuccess {
   const WorkerCmdSuccess(this.cmdId, this.value);
   final int cmdId;
   final dynamic value;
 }
 
+/// Failed RPC response sent back to the host on `replyPort`.
 class WorkerCmdError {
   const WorkerCmdError(this.cmdId, this.error);
   final int cmdId;
   final Object error;
 }
 
+/// Tracks an in-flight asynchronous JS evaluation awaiting Promise settlement
+/// or Dart-side timeout expiry.
 class _PendingAsyncEval {
   _PendingAsyncEval(this.cmdId, this.replyPort, this.timeoutTimer);
   final int cmdId;
@@ -219,6 +299,10 @@ class _PendingAsyncEval {
 }
 
 /// Entry point for the dedicated JavaScript worker isolate.
+///
+/// Owns the `QjsEngine*`, all `NativeCallable.isolateLocal` C callbacks,
+/// active JS timers, and pending async evaluation timers for the lifetime of
+/// the runtime.
 void qjsWorkerMain(WorkerInitMessage init) {
   final workerPort = ReceivePort();
   QjsBindings bindings;
@@ -236,6 +320,8 @@ void qjsWorkerMain(WorkerInitMessage init) {
   var nextAsyncEvalId = 1;
   var disposed = false;
 
+  // Completes a pending async eval at most once (either via Promise settlement
+  // or the async wall-clock timeout timer) and cancels its timeout timer.
   void sendAsyncResult(int evalId, bool ok, dynamic valueOrError) {
     final pending = pendingAsyncEvals.remove(evalId);
     if (pending == null) return;
@@ -247,6 +333,8 @@ void qjsWorkerMain(WorkerInitMessage init) {
     }
   }
 
+  // Executes an internal bridge snippet (timer callback, global setter, or
+  // host reply) without producing a return value.
   void runJsSilent(String code, String filename) {
     if (disposed || engine == nullptr) return;
     final codePtr = code.toNativeUtf8();
@@ -262,6 +350,8 @@ void qjsWorkerMain(WorkerInitMessage init) {
     }
   }
 
+  // Flushes QuickJS-ng's microtask/Promise job queue after timer or host
+  // callbacks re-enter JS.
   void drainPendingJobs() {
     if (disposed || engine == nullptr) return;
     final resPtr = calloc<NativeEvalResult>();
@@ -273,6 +363,8 @@ void qjsWorkerMain(WorkerInitMessage init) {
     }
   }
 
+  // Isolate-local NativeCallables can be invoked synchronously from C on this
+  // worker thread. They must remain open until `bindings.destroy(engine)`.
   late final NativeCallable<NativeConsoleCallback> onConsoleCb;
   late final NativeCallable<NativeTimerSetCallback> onTimerSetCb;
   late final NativeCallable<NativeTimerClearCallback> onTimerClearCb;
@@ -412,6 +504,8 @@ void qjsWorkerMain(WorkerInitMessage init) {
     ..onEvalSettled = onEvalSettledCb.nativeFunction
     ..onModuleRequest = onModuleRequestCb.nativeFunction;
 
+  // Destroys the native engine first so QuickJS-ng cannot invoke any callback
+  // after its `NativeCallable` is closed.
   void cleanupNative() {
     for (final timer in timers.values) {
       timer.cancel();
@@ -457,7 +551,7 @@ void qjsWorkerMain(WorkerInitMessage init) {
     return;
   }
 
-  // Bootstrap polyfills, initial modules, and initial globals.
+  // Bootstrap sequence: 1) polyfills, 2) static modules, 3) initial globals.
   final bootstrapCode = buildPolyfillBootstrap(
     enableFetchPolyfill: init.enableFetchPolyfill,
   );
@@ -529,6 +623,9 @@ void qjsWorkerMain(WorkerInitMessage init) {
         return;
       }
 
+      // Async evals and ES modules share a dual timeout: C's interrupt handler
+      // aborts tight synchronous JS loops, while `asyncTimer` aborts Promises
+      // that never settle while the isolate is idle waiting on timers/I/O.
       final useAsync = message.isAsync || message.isModule;
       final evalId = useAsync ? nextAsyncEvalId++ : 0;
       final effectiveTimeoutMs =

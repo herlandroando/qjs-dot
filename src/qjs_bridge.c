@@ -1,3 +1,13 @@
+/**
+ * @file qjs_bridge.c
+ * @brief QuickJS-ng (`v0.18.0`) bridge implementation for `qjs_dot`.
+ *
+ * Implements engine lifecycle, interrupt-based execution deadlines, structured
+ * exception extraction, JS value serialization, host intrinsics, and
+ * synchronous/dynamic ES module loading with cross-thread condition-variable
+ * coordination.
+ */
+
 #include "qjs_bridge.h"
 #include "quickjs-ng/quickjs.h"
 
@@ -13,27 +23,32 @@
   #include <time.h>
 #endif
 
+/** Maximum time (ms) `qjs_module_loader` waits on Dart's async `moduleLoader`. */
 #define QJS_MODULE_WAIT_TIMEOUT_MS 30000
 
+/** Static ES module registry entry owned by `QjsEngine`. */
 typedef struct QjsModuleEntry {
   char* specifier;
   char* source;
 } QjsModuleEntry;
 
+/** Internal engine state backing the opaque `QjsEngine` handle. */
 struct QjsEngine {
   JSRuntime* rt;
   JSContext* ctx;
   QjsCallbacks cb;
 
-  int64_t default_timeout_ms;
-  int64_t deadline_ms;
-  volatile int32_t timed_out;
-  volatile int32_t disposed;
+  int64_t default_timeout_ms; /**< Engine default deadline (`<= 0` disabled). */
+  int64_t deadline_ms;        /**< Active monotonic deadline (`0` = disarmed). */
+  volatile int32_t timed_out; /**< Set to 1 by `qjs_interrupt_handler` on timeout. */
+  volatile int32_t disposed;  /**< Set to 1 on dispose to abort execution/waits. */
 
+  /* Static ES module registry (linear array; worker-thread only). */
   QjsModuleEntry* modules;
   size_t module_count;
   size_t module_capacity;
 
+  /* Dynamic module loader handshake protected by `lock` + `cond`. */
   int64_t next_module_request_id;
   int64_t pending_module_id;
   int32_t pending_module_done;
@@ -50,6 +65,10 @@ struct QjsEngine {
 #endif
 };
 
+/* ========================================================================= */
+/* Timing, Interrupt Deadlines, Error Extraction & Serialization             */
+/* ========================================================================= */
+
 static char* qjs_dup_cstr(const char* s) {
   if (!s) return NULL;
   size_t len = strlen(s);
@@ -59,6 +78,7 @@ static char* qjs_dup_cstr(const char* s) {
   return copy;
 }
 
+/* Returns monotonic milliseconds for deadline tracking without wall-clock skew. */
 static int64_t qjs_monotonic_ms(const QjsEngine* engine) {
 #ifdef _WIN32
   LARGE_INTEGER now;
@@ -75,6 +95,7 @@ static int64_t qjs_monotonic_ms(const QjsEngine* engine) {
 #endif
 }
 
+/* Arms the per-call interrupt deadline (`< 0` inherits default, `0` disables). */
 static void qjs_arm_deadline(QjsEngine* engine, int64_t timeout_ms) {
   int64_t effective = timeout_ms >= 0 ? timeout_ms : engine->default_timeout_ms;
   engine->timed_out = 0;
@@ -89,6 +110,7 @@ static void qjs_disarm_deadline(QjsEngine* engine) {
   engine->deadline_ms = 0;
 }
 
+/* QuickJS-ng periodic interrupt hook: returns non-zero to abort execution. */
 static int qjs_interrupt_handler(JSContext* ctx, void* opaque) {
   (void)ctx;
   QjsEngine* engine = (QjsEngine*)opaque;
@@ -116,6 +138,7 @@ static char* qjs_jsval_to_cstr_dup(JSContext* ctx, JSValueConst val) {
   return copy;
 }
 
+/* Populates `out` from a thrown JS value, detecting timeouts and OOM errors. */
 static void qjs_populate_error_from_value(
     QjsEngine* engine,
     JSContext* ctx,
@@ -124,6 +147,8 @@ static void qjs_populate_error_from_value(
   out->ok = 0;
   out->pending_async = 0;
 
+  /* Interrupt timeouts surface in QuickJS as a generic internal error; override
+     with a structured TimeoutError when `engine->timed_out` was triggered. */
   if (engine && engine->timed_out) {
     out->is_timeout = 1;
     out->error_name = qjs_dup_cstr("TimeoutError");
@@ -175,6 +200,8 @@ static void qjs_extract_pending_exception(QjsEngine* engine, QjsEvalResult* out)
   JS_FreeValue(engine->ctx, exc);
 }
 
+/* Serializes a JS value via the polyfill `__qjs_dot_encode` envelope when
+   installed, falling back to `JS_JSONStringify` during early bootstrap. */
 static char* qjs_serialize_value(JSContext* ctx, JSValueConst val, int* is_err) {
   *is_err = 0;
   if (JS_IsUndefined(val) || JS_IsNull(val)) {
@@ -218,6 +245,7 @@ static char* qjs_serialize_value(JSContext* ctx, JSValueConst val, int* is_err) 
   return res;
 }
 
+/* Executes all queued QuickJS microtasks/Promise jobs until empty or error. */
 static int qjs_drain_pending_jobs(QjsEngine* engine, QjsEvalResult* out) {
   JSContext* pctx = NULL;
   int rc;
@@ -239,6 +267,8 @@ static int qjs_drain_pending_jobs(QjsEngine* engine, QjsEvalResult* out) {
   return 0;
 }
 
+/* Hooks an unsettled Promise/thenable to `__qjs_dot_attach_promise` so it
+   notifies Dart via `__qjs_dot_eval_settled` when resolved or rejected. */
 static int qjs_attach_async_promise(
     QjsEngine* engine,
     int64_t eval_id,
@@ -270,7 +300,7 @@ static int qjs_attach_async_promise(
 }
 
 /* ========================================================================= */
-/* Host Intrinsics                                                           */
+/* Host Intrinsics (__qjs_dot_* bindings exposed to bootstrap polyfills)     */
 /* ========================================================================= */
 
 static JSValue qjs_host_console(
@@ -488,6 +518,8 @@ static const char* qjs_find_registered_module(
   return NULL;
 }
 
+/* Normalizes relative ES module specifiers (`./`, `../`) against `module_base_name`
+   using POSIX path rules while keeping bare/scheme specifiers untouched. */
 static char* qjs_module_normalize(
     JSContext* ctx,
     const char* module_base_name,
@@ -612,6 +644,8 @@ static char* qjs_module_normalize(
   return out;
 }
 
+/* QuickJS-ng module loader hook: checks static registry first, then blocks on
+   `cond` while the Dart host resolves `moduleLoader` asynchronously. */
 static JSModuleDef* qjs_module_loader(
     JSContext* ctx,
     const char* module_name,
@@ -763,7 +797,7 @@ static JSModuleDef* qjs_module_loader(
 }
 
 /* ========================================================================= */
-/* Public C API                                                              */
+/* Public C API (contracts documented in qjs_bridge.h)                       */
 /* ========================================================================= */
 
 QJS_DOT_EXPORT QjsEngine* qjs_dot_create(
