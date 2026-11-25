@@ -1,0 +1,51 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.pub/
+.pub-cache/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+coverage/
+pubspec.lock
+example/.dart_tool/
+example/.flutter-plugins
+example/.flutter-plugins-dependencies
+example/build/
+example/coverage/
+example/pubspec.lock
+
+# FVM
+.fvm/flutter_sdk
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+
+# Android / Gradle
+android/.gradle/
+android/.cxx/
+android/local.properties
+example/android/.gradle/
+example/android/.cxx/
+example/android/local.properties
+*.jks
+*.keystore
+key.properties
+
+# iOS / macOS / Xcode
+example/ios/Pods/
+example/ios/.symlinks/
+example/macos/Pods/
+example/macos/.symlinks/
+xcuserdata/
+.swiftpm/
+
+# Windows / Linux CMake
+example/windows/flutter/ephemeral/
+example/linux/flutter/ephemeral/
